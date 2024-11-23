@@ -1,9 +1,20 @@
-use std::{collections::HashMap, fmt::format};
+use ordered_float::OrderedFloat;
+use std::collections::HashMap;
+
+#[derive(Debug, PartialEq, Eq)]
+enum JsonNumber {
+    Integer(i64),
+    Float(OrderedFloat<f64>),
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum JsonToken {
     Object(JsonObject),
     String(String),
+    Number(JsonNumber), // ? Maybe change this to BigInt
+    True,
+    False,
+    Null,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,38 +70,81 @@ impl Parser {
         // Read key : value pairs
         while !self.is_done() {
             self.skip_whitespace();
-            match (&parse_state, self.peek()) {
-                (ParseState::Key, Some(&'}')) => break,
-                (ParseState::Key, Some(&'\"')) => {
+            match (
+                &parse_state,
+                *self
+                    .peek()
+                    .expect("I do not expect this to panic MATCH PARSE STATE"),
+            ) {
+                (ParseState::Key, '}') => break,
+                (ParseState::Value, '}') => {
+                    if expect_one_more_kv_pair {
+                        return Err(SomeError {
+                            msg: "Expexted one more value, got  }  instead".to_string(),
+                        });
+                    }
+                    break;
+                }
+                (ParseState::Key, '\"') => {
                     if current_key.is_some() {
                         return Err(SomeError {
-                            msg: format!("Expected  :  after key got  \"  "),
+                            msg: format!("Expected  :  after key got  \"  index: {}", self.index),
                         });
                     }
                     current_key = Some(self.parse_string()?);
                 }
 
-                (ParseState::Key, Some(&':')) => {
+                (ParseState::Key, ':') => {
                     self.pop();
                     parse_state = ParseState::Value;
                 }
 
-                (ParseState::Value, Some(&'"')) => {
+                (ParseState::Value, '\"') => {
                     let value = self.parse_string()?;
                     let key = current_key.take().unwrap();
                     keys.insert(key, JsonToken::String(value));
+                    expect_one_more_kv_pair = false;
                 }
 
-                (ParseState::Value, Some(&',')) => {
+                (ParseState::Value, '-' | '0'..='9') => {
+                    let value = self.parse_number()?;
+                    let key = current_key.take().unwrap();
+                    keys.insert(key, JsonToken::Number(value));
+                    expect_one_more_kv_pair = false;
+                }
+
+                (ParseState::Value, token @ ('t' | 'f' | 'n')) => {
+                    let value = match token {
+                        't' => {
+                            self.parse_expected_word("true")?;
+                            JsonToken::True
+                        }
+                        'f' => {
+                            self.parse_expected_word("false")?;
+                            JsonToken::False
+                        }
+                        'n' => {
+                            self.parse_expected_word("null")?;
+                            JsonToken::Null
+                        }
+                        _ => unreachable!(),
+                    };
+                    let key = current_key.take().unwrap();
+                    keys.insert(key, value);
+                    expect_one_more_kv_pair = false;
+                }
+
+                (ParseState::Value, ',') => {
+                    parse_state = ParseState::Key;
                     expect_one_more_kv_pair = true;
                     self.pop();
                 }
-                (_, Some(unexpected)) => {
+
+                (_, unexpected) => {
                     return Err(SomeError {
-                        msg: format!("Unexpected token {}", unexpected),
+                        msg: format!("Unexpected token {}  index: {}", unexpected, self.index),
                     })
                 }
-                (_, None) => unreachable!(),
             }
         }
 
@@ -117,8 +171,7 @@ impl Parser {
         }
 
         while let Some(c) = self.pop() {
-            if c == &'"' {
-                self.pop();
+            if c == &'\"' {
                 break;
             }
             s.push(*c);
@@ -131,6 +184,53 @@ impl Parser {
         }
 
         return Ok(s);
+    }
+
+    fn parse_number(&mut self) -> Result<JsonNumber, SomeError> {
+        let mut number = String::new();
+        while let Some(c) = self.peek() {
+            match *c {
+                '0'..'9' | '.' | '-' | 'E' | 'e' => {
+                    number.push(*c);
+                    self.pop();
+                }
+                _ => break,
+            }
+        }
+
+        // Attempt to parse as an integer
+        if let Ok(integer) = number.parse::<i64>() {
+            return Ok(JsonNumber::Integer(integer));
+        }
+
+        // If that fails, attempt to parse as a float
+        if let Ok(float) = number.parse::<f64>() {
+            return Ok(JsonNumber::Float(OrderedFloat(float)));
+        }
+
+        Err(SomeError {
+            msg: format!("Invalid Json number: {}", number),
+        })
+    }
+
+    fn parse_expected_word(&mut self, word: &str) -> Result<(), SomeError> {
+        for expected in word.chars() {
+            if let Some(ch) = self.pop() {
+                if expected != *ch {
+                    return Err(SomeError {
+                        msg: format!(
+                            "Expected token {} for word {} found token {}",
+                            expected, word, ch
+                        ),
+                    });
+                }
+            } else {
+                return Err(SomeError {
+                    msg: "Json mssing terminator".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn peek(&self) -> Option<&char> {
@@ -197,6 +297,7 @@ mod tests {
 
     #[test]
     fn non_double_quoted_property() {
+        // key2 should have double quotes around it here
         let result = parse_json(
             r#"{
   "key": "value",
@@ -226,8 +327,54 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let keys: HashMap<String, JsonToken> =
-            HashMap::from([("key".to_string(), JsonToken::String("value".to_string())), ("key2".to_string(), JsonToken::String("value".to_string()))]);
+        let keys: HashMap<String, JsonToken> = HashMap::from([
+            ("key".to_string(), JsonToken::String("value".to_string())),
+            ("key2".to_string(), JsonToken::String("value".to_string())),
+        ]);
+
+        let compare = JsonObject { keys: Some(keys) };
+
+        assert_eq!(result, compare)
+    }
+
+    #[test]
+    fn non_valid_boolean() {
+        let result = parse_json(
+            r#"{
+  "key1": true,
+  "key2": False,
+  "key3": null,
+  "key4": "value",
+  "key5": 101
+}"#,
+        );
+
+        assert!(result.is_err())
+    }
+
+    #[test]
+    fn valid_bool_and_number() {
+        let result = parse_json(
+            r#"{
+  "key1": true,
+  "key2": false,
+  "key3": null,
+  "key4": "value",
+  "key5": 101
+}"#,
+        )
+        .unwrap();
+
+        let keys: HashMap<String, JsonToken> = HashMap::from([
+            ("key1".to_string(), JsonToken::True),
+            ("key2".to_string(), JsonToken::False),
+            ("key3".to_string(), JsonToken::Null),
+            ("key4".to_string(), JsonToken::String("value".to_string())),
+            (
+                "key5".to_string(),
+                JsonToken::Number(JsonNumber::Integer(101)),
+            ),
+        ]);
 
         let compare = JsonObject { keys: Some(keys) };
 
