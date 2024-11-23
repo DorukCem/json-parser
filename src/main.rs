@@ -65,8 +65,6 @@ impl Parser {
                 }),
             });
         }
-        self.skip_whitespace();
-
         let mut parse_state = ParseState::Key;
         let mut current_key = None;
         let mut keys: HashMap<String, JsonToken> = HashMap::new();
@@ -165,7 +163,61 @@ impl Parser {
     }
 
     fn parse_array(&mut self) -> Result<JsonArray, SomeError> {
-        todo!()
+        if Some(&'[') != self.pop() {
+            return Err(SomeError {
+                msg: "Expected array to start with  [  ".to_string(),
+            });
+        }
+
+        let mut items = Vec::new();
+        let mut expecting_one_more_array_element = false;
+        let mut expecting_seperator = false;
+
+        while !self.is_done() {
+            self.skip_whitespace();
+            match *self
+                .peek()
+                .expect("I do not expect this to fail MATCH STATEMENT IN PARSE ARRAY")
+            {   
+                ']' => break,
+                
+                ',' => {
+                    if !expecting_seperator {
+                        return Err(SomeError {
+                            msg: "Expected a array element before comma".to_string(),
+                        });
+                    }
+                    self.pop();
+                    expecting_one_more_array_element = true;
+                    expecting_seperator = false;
+                }
+
+                _value => {
+                    if expecting_seperator {
+                        return Err(SomeError {
+                            msg: "Expected a comma before another value inside array".to_string(),
+                        });
+                    }
+
+                    let item = self.parse_json_value()?;
+                    items.push(item);
+                    expecting_seperator = true;
+                    expecting_one_more_array_element = false;
+                }
+            }
+        }
+
+        if expecting_one_more_array_element {
+            return Err(SomeError {
+                msg: "Expected one more array element after comma".to_string(),
+            });
+        }
+
+        self.pop();
+
+        return Ok(JsonArray {
+            items: if items.len() > 0 { Some(items) } else { None },
+        });
     }
 
     fn parse_number(&mut self) -> Result<JsonNumber, SomeError> {
@@ -395,4 +447,256 @@ mod tests {
 
         assert_eq!(result, compare)
     }
+
+    #[test]
+    fn invalid_array() {
+        let result = parse_json(
+            r#"{
+  "key": "value",
+  "key-n": 101,
+  "key-o": {
+    "inner key": "inner value"
+  },
+  "key-l": ['list value']
+}"#,
+        );
+
+        assert!(result.is_err())
+    }
+
+    #[test]
+    fn valid_empty_object_and_array() {
+        let result = parse_json(
+            r#"{
+  "key": "value",
+  "key-n": 101,
+  "key-o": {},
+  "key-l": []
+}"#,
+        )
+        .unwrap();
+
+        let keys: HashMap<String, JsonToken> = HashMap::from([
+            ("key".to_string(), JsonToken::String("value".to_string())),
+            ("key-n".to_string(), JsonToken::Number(JsonNumber::Integer(101))),
+            ("key-o".to_string(), JsonToken::Object(JsonObject{keys: None} )),
+            ("key-l".to_string(), JsonToken::Array(JsonArray{items: None} )),
+            
+        ]);
+
+        let compare = JsonObject { keys: Some(keys) };
+
+        assert_eq!(result, compare)
+    }
+
+    #[test]
+    fn valid_nested_object_and_array() {
+        let result = parse_json(
+            r#"{
+  "key": "value",
+  "key-n": 101,
+  "key-o": {
+    "inner key": "inner value"
+  },
+  "key-l": ["list value"]
+}"#,
+        )
+        .unwrap();
+
+        let inner_keys: HashMap<String, JsonToken> = HashMap::from([
+            ("inner key".to_string(), JsonToken::String("inner value".to_string())),
+        ]);
+    
+        let keys: HashMap<String, JsonToken> = HashMap::from([
+            ("key".to_string(), JsonToken::String("value".to_string())),
+            ("key-n".to_string(), JsonToken::Number(JsonNumber::Integer(101))),
+            (
+                "key-o".to_string(),
+                JsonToken::Object(JsonObject {
+                    keys: Some(inner_keys),
+                }),
+            ),
+            (
+                "key-l".to_string(),
+                JsonToken::Array(JsonArray {
+                    items: Some(vec![JsonToken::String("list value".to_string())]),
+                }),
+            ),
+        ]);
+
+        let compare = JsonObject { keys: Some(keys) };
+
+        assert_eq!(result, compare)
+    }
+
+    #[test]
+fn deeply_nested_object() {
+    let result = parse_json(
+        r#"{
+  "level1": {
+    "level2": {
+      "level3": {
+        "level4": "deep value"
+      }
+    }
+  }
+}"#,
+    )
+    .unwrap();
+
+    let level4_keys = HashMap::from([("level4".to_string(), JsonToken::String("deep value".to_string()))]);
+    let level3_keys = HashMap::from([(
+        "level3".to_string(),
+        JsonToken::Object(JsonObject {
+            keys: Some(level4_keys),
+        }),
+    )]);
+    let level2_keys = HashMap::from([(
+        "level2".to_string(),
+        JsonToken::Object(JsonObject {
+            keys: Some(level3_keys),
+        }),
+    )]);
+    let level1_keys = HashMap::from([(
+        "level1".to_string(),
+        JsonToken::Object(JsonObject {
+            keys: Some(level2_keys),
+        }),
+    )]);
+
+    let compare = JsonObject { keys: Some(level1_keys) };
+
+    assert_eq!(result, compare);
+}
+
+#[test]
+fn nested_arrays() {
+    let result = parse_json(
+        r#"{
+  "array": [
+    [1, 2, 3],
+    ["nested", "array"],
+    []
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let array_items = vec![
+        JsonToken::Array(JsonArray {
+            items: Some(vec![
+                JsonToken::Number(JsonNumber::Integer(1)),
+                JsonToken::Number(JsonNumber::Integer(2)),
+                JsonToken::Number(JsonNumber::Integer(3)),
+            ]),
+        }),
+        JsonToken::Array(JsonArray {
+            items: Some(vec![
+                JsonToken::String("nested".to_string()),
+                JsonToken::String("array".to_string()),
+            ]),
+        }),
+        JsonToken::Array(JsonArray { items: None }),
+    ];
+
+    let keys = HashMap::from([(
+        "array".to_string(),
+        JsonToken::Array(JsonArray {
+            items: Some(array_items),
+        }),
+    )]);
+
+    let compare = JsonObject { keys: Some(keys) };
+
+    assert_eq!(result, compare);
+}
+
+#[test]
+fn mixed_nested_structures() {
+    let result = parse_json(
+        r#"{
+  "object": {
+    "array": [1, 2, {"key": "value"}],
+    "key": "string"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let inner_object_keys = HashMap::from([("key".to_string(), JsonToken::String("value".to_string()))]);
+    let array_items = vec![
+        JsonToken::Number(JsonNumber::Integer(1)),
+        JsonToken::Number(JsonNumber::Integer(2)),
+        JsonToken::Object(JsonObject {
+            keys: Some(inner_object_keys),
+        }),
+    ];
+
+    let object_keys = HashMap::from([
+        (
+            "array".to_string(),
+            JsonToken::Array(JsonArray {
+                items: Some(array_items),
+            }),
+        ),
+        ("key".to_string(), JsonToken::String("string".to_string())),
+    ]);
+
+    let keys = HashMap::from([(
+        "object".to_string(),
+        JsonToken::Object(JsonObject {
+            keys: Some(object_keys),
+        }),
+    )]);
+
+    let compare = JsonObject { keys: Some(keys) };
+
+    assert_eq!(result, compare);
+}
+
+#[test]
+fn empty_and_nonempty_nested_structures() {
+    let result = parse_json(
+        r#"{
+  "emptyObject": {},
+  "emptyArray": [],
+  "nonEmpty": {
+    "key": [1, 2]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let non_empty_keys = HashMap::from([(
+        "key".to_string(),
+        JsonToken::Array(JsonArray {
+            items: Some(vec![
+                JsonToken::Number(JsonNumber::Integer(1)),
+                JsonToken::Number(JsonNumber::Integer(2)),
+            ]),
+        }),
+    )]);
+
+    let keys = HashMap::from([
+        (
+            "emptyObject".to_string(),
+            JsonToken::Object(JsonObject { keys: None }),
+        ),
+        (
+            "emptyArray".to_string(),
+            JsonToken::Array(JsonArray { items: None }),
+        ),
+        (
+            "nonEmpty".to_string(),
+            JsonToken::Object(JsonObject {
+                keys: Some(non_empty_keys),
+            }),
+        ),
+    ]);
+
+    let compare = JsonObject { keys: Some(keys) };
+
+    assert_eq!(result, compare);
+}
+
 }
