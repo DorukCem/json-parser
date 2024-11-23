@@ -10,11 +10,16 @@ enum JsonNumber {
 #[derive(Debug, PartialEq, Eq)]
 enum JsonToken {
     Object(JsonObject),
+    Array(JsonArray),
     String(String),
-    Number(JsonNumber), // ? Maybe change this to BigInt
+    Number(JsonNumber),
     True,
     False,
     Null,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct JsonArray {
+    items: Option<Vec<JsonToken>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,7 +60,7 @@ impl Parser {
         let first = self.pop();
         if Some(&'{') != first {
             return Err(SomeError {
-                msg: format!("Expected object to start with: {{ instead got: {:?}", {
+                msg: format!("Expected object to start with: {{ instead got: {:?}  ", {
                     first.unwrap()
                 }),
             });
@@ -77,14 +82,12 @@ impl Parser {
                     .expect("I do not expect this to panic MATCH PARSE STATE"),
             ) {
                 (ParseState::Key, '}') => break,
-                (ParseState::Value, '}') => {
-                    if expect_one_more_kv_pair {
-                        return Err(SomeError {
-                            msg: "Expexted one more value, got  }  instead".to_string(),
-                        });
-                    }
-                    break;
+
+                (ParseState::Key, ':') => {
+                    self.pop();
+                    parse_state = ParseState::Value;
                 }
+
                 (ParseState::Key, '\"') => {
                     if current_key.is_some() {
                         return Err(SomeError {
@@ -94,50 +97,25 @@ impl Parser {
                     current_key = Some(self.parse_string()?);
                 }
 
-                (ParseState::Key, ':') => {
-                    self.pop();
-                    parse_state = ParseState::Value;
+                (ParseState::Value, '}') => {
+                    if expect_one_more_kv_pair {
+                        return Err(SomeError {
+                            msg: "Expexted one more value, got  }  instead".to_string(),
+                        });
+                    }
+                    break;
                 }
-
-                (ParseState::Value, '\"') => {
-                    let value = self.parse_string()?;
-                    let key = current_key.take().unwrap();
-                    keys.insert(key, JsonToken::String(value));
-                    expect_one_more_kv_pair = false;
-                }
-
-                (ParseState::Value, '-' | '0'..='9') => {
-                    let value = self.parse_number()?;
-                    let key = current_key.take().unwrap();
-                    keys.insert(key, JsonToken::Number(value));
-                    expect_one_more_kv_pair = false;
-                }
-
-                (ParseState::Value, token @ ('t' | 'f' | 'n')) => {
-                    let value = match token {
-                        't' => {
-                            self.parse_expected_word("true")?;
-                            JsonToken::True
-                        }
-                        'f' => {
-                            self.parse_expected_word("false")?;
-                            JsonToken::False
-                        }
-                        'n' => {
-                            self.parse_expected_word("null")?;
-                            JsonToken::Null
-                        }
-                        _ => unreachable!(),
-                    };
-                    let key = current_key.take().unwrap();
-                    keys.insert(key, value);
-                    expect_one_more_kv_pair = false;
-                }
-
                 (ParseState::Value, ',') => {
                     parse_state = ParseState::Key;
                     expect_one_more_kv_pair = true;
                     self.pop();
+                }
+
+                (ParseState::Value, _value) => {
+                    let value = self.parse_json_value()?;
+                    let key = current_key.take().unwrap();
+                    keys.insert(key, value);
+                    expect_one_more_kv_pair = false;
                 }
 
                 (_, unexpected) => {
@@ -184,6 +162,10 @@ impl Parser {
         }
 
         return Ok(s);
+    }
+
+    fn parse_array(&mut self) -> Result<JsonArray, SomeError> {
+        todo!()
     }
 
     fn parse_number(&mut self) -> Result<JsonNumber, SomeError> {
@@ -256,6 +238,39 @@ impl Parser {
             return false;
         }
         true
+    }
+
+    fn parse_json_value(&mut self) -> Result<JsonToken, SomeError> {
+        match *self.peek().unwrap() {
+            '\"' => Ok(JsonToken::String(self.parse_string()?)),
+            '{' => Ok(JsonToken::Object(self.parse_object()?)),
+
+            '[' => Ok(JsonToken::Array(self.parse_array()?)),
+
+            '-' | '0'..='9' => Ok(JsonToken::Number(self.parse_number()?)),
+
+            token @ ('t' | 'f' | 'n') => match token {
+                't' => {
+                    self.parse_expected_word("true")?;
+                    Ok(JsonToken::True)
+                }
+                'f' => {
+                    self.parse_expected_word("false")?;
+                    Ok(JsonToken::False)
+                }
+                'n' => {
+                    self.parse_expected_word("null")?;
+                    Ok(JsonToken::Null)
+                }
+                _ => unreachable!(),
+            },
+
+            unexpected => {
+                return Err(SomeError {
+                    msg: format!("Unexpected token {}  index: {}", unexpected, self.index),
+                })
+            }
+        }
     }
 }
 
